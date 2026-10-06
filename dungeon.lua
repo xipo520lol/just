@@ -1513,13 +1513,19 @@ Chest = (function()
 			-- ★ 第七步：刷怪点四 ★
 			-- 进门之后【要传送到这个固定点】再打（你给的坐标）。
 			-- 刷怪点是靠近触发的，传过去就会刷。
-			{ name = "刷怪四", pos = Vector3.new(-8470.1, 1126, 4235), interact = false },
+			--
+			-- hold = false：★ 不要往这个点拉回 ★
+			-- 这站要打怪，玩家得跟着怪跑；拉回来会变成"打一下被拽回、
+			-- 下一波又跑出去"的来回传送（你反馈的"刷怪四重复传送"）。
+			{ name = "刷怪四", pos = Vector3.new(-8470.1, 1126, 4235), interact = false,
+			  hold = false },
 			-- ★ 第八步：重启地牢 ★
-			-- 切到 6 号位，然后一直左键（点那个道具来重开地牢）。
-			-- clickFor 是点多久（秒）—— 30 秒不够就加大。
+			-- 切到 6 号位，然后【无限】左键（point 到换服为止）。
+			-- clickFor = 0 表示一直点，直到你按 Y 停。
+			-- ★ 期间农场不许换武器 ★（见 ensureEquipped 里的 holdSlotActive 检查）
 			{ name = "重启地牢", noMove = true, interact = false,
 			  fight = false, loot = false,
-			  slot = 6, clickFor = 30, settle = 0.5 },
+			  slot = 6, clickFor = 0, settle = 0.5 },
 		},
 		-- ★ 与门互动要【长按 E 5 秒】★（你实测出来的）
 		autoInteractHold = 5.0,
@@ -1562,7 +1568,7 @@ Chest = (function()
 		-- 刷怪点是"靠近就触发"的：跑到别处（比如去开远处的箱子）就离开触发区了。
 		-- 所以在"等怪/等掉落"期间把自己拉回站点坐标。
 		holdAtPoint      = true,
-		holdRange        = 20,     -- 离传送点超过这么多就拉回去
+		holdRange        = 50,     -- 离传送点超过这么多才拉回（原来 20，太容易触发）
 		autoStepWait   = 1.0,      -- 按完 E 等多久再进下一阶段
 		autoLootIdleTime = 6.0,    -- 连续这么久"没进展"才算这站收完（恐怖箱要按住4秒，留余量）
 
@@ -2409,21 +2415,27 @@ Chest = (function()
 		end
 
 		-- ★ 一直左键 ★ 用于重启地牢那种"点道具"的操作
+		-- clickFor = 0（或负数）= 【无限点下去】，直到你按 Y 停。
 		if wp.clickFor then
 			local dur = tonumber(wp.clickFor) or 30
+			local forever = (dur <= 0)
 			local n = 0
 			-- ★ 一直"拿着"这个栏位 ★（你要求的）
-			-- 光按一次不够：喝药/技能/农场都可能把手上换成别的。
-			-- 所以整个过程中每隔一小段就【补按一次】这个栏位键，
-			-- 保证一直是这个道具在手上。
 			local slotKey = wp.slot and SLOT_KEYS[wp.slot] or nil
 			holdSlotActive = slotKey ~= nil
-			print(string.format("[Chest]   开始连续左键 %.0f 秒（拿着 %s 号位，重启地牢）…",
-				dur, tostring(wp.slot or "?")))
-			-- 按次数循环而不是看时钟：替身里 task.wait 不推进 os.clock
-			local steps = math.max(1, math.floor(dur / 0.1))
-			for i = 1, steps do
-				-- 每 10 次（约 1 秒）补按一次栏位键，保证道具还在手上
+			print(string.format("[Chest]   %s：拿着 %s 号位物品，%s左键（按 Y 可停）…",
+				wp.name, tostring(wp.slot or "?"),
+				forever and "【无限】" or string.format("连续 %.0f 秒", dur)))
+			local steps = forever and math.huge or math.max(1, math.floor(dur / 0.1))
+			local i = 0
+			while true do
+				i = i + 1
+				if not forever and i > steps then break end
+				if not auto.active then
+					print("[Chest]   已停止（按了 Y）")
+					break
+				end
+				-- 每 10 次（约 1 秒）补按一次栏位键，保证物品还在手上
 				if slotKey and (i - 1) % 10 == 0 then
 					pressKey(slotKey)
 				end
@@ -2432,7 +2444,7 @@ Chest = (function()
 				task.wait(jitter(0.1))
 			end
 			holdSlotActive = false
-			print(string.format("[Chest]   连续左键结束（点了 %d 次）", n))
+			print(string.format("[Chest]   左键结束（共点了 %d 次）", n))
 		end
 
 		if wp.interact ~= false then
@@ -2524,6 +2536,11 @@ Chest = (function()
 		-- 收战利品那站要跑很远去捡东西（keyRange=2500），
 		-- 拉回原点等于"跑出去→拉回来→再跑出去"，一直瞬移（你反馈的）。
 		if wp.hold == false then return end
+		-- ★ 刚打过怪就别拉回来 ★（你反馈的"重复传送"）
+		-- 一波怪打完到下一波之间有间隙，hasTarget 会短暂变 false。
+		-- 那时候拉回传送点，就变成"打一波→被拽回→再跑出去"的来回传送。
+		-- 要求"确实有一阵子没见过怪"才允许拉，正好和安静期一个道理。
+		if os.clock() - (auto.lastMobAt or 0) < (C.holdQuiet or 8.0) then return end
 		-- ★ 节流 ★ 别一秒拉好几次
 		local nowH = os.clock()
 		if nowH - holdLastAt < (C.holdMinInterval or 3.0) then return end
@@ -3593,7 +3610,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v35 | 第七步用固定传送点 -8470.1,1126,4235 | 8站 ★")
+print("[Farm] ★ 版本 v37 | 第八步无限左键(6号位,按Y停) + 修重复传送 | 8站 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
