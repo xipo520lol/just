@@ -4,44 +4,105 @@
 	================================================================
 
 	 用法：
-	   1. 把 dungeon.lua 【和这个 loader.lua】都传到同一个公开仓库
-	   2. 确认下面的 SCRIPT_URL 是你的 dungeon.lua raw 链接
+	   1. dungeon.lua 和这个 loader.lua 都放在同一个【公开】仓库
+	   2. 确认下面的 SCRIPT_URL 是 dungeon.lua 的 raw 链接
 	   3. 在 Xeno 里执行【这个文件】一次
 
-	 之后就是全自动：
-	   随便换多少次服务器都会自己回来。
-
-	 为什么能续链：
-	   排队的代码去重新拉取【加载器自己】（链接是从 SCRIPT_URL 推导的），
-	   加载器每次运行又会再排一次队 —— 于是无限续下去。
-	   （早先的版本排队的是 dungeon.lua，它自己不再排队，
-	     所以只能自动一次，第二次换服就断了。）
-
-	 注意：仓库必须【公开】，私有仓库的 raw 链接需要登录，拉不到。
+	 v4 依据实测日志修的：
+	   日志显示 —— game:HttpGet ok=true -> nil（调用成功但返回 nil，静默失败）
+	              request    ok=true -> table:0x...（★ 其实成功了 ★）
+	   所以：request 放第一位，并且放宽对返回格式的接受（Body / body / 直接字符串）。
 --]]
 
 -- ══════════════════════════════════════════════════════════
---  ★ 这一行你已填好：dungeon.lua 的 raw 链接 ★
--- ══════════════════════════════════════════════════════════
 local SCRIPT_URL = "https://raw.githubusercontent.com/xipo520lol/just/refs/heads/main/dungeon.lua"
+-- ══════════════════════════════════════════════════════════
 
+-- ★ 开关：不想要"换服后自动拉取"就改成 false（只拉一次，不续链）
+local AUTO_RECUR = true
 -- ══════════════════════════════════════════════════════════
---  加载器自己的链接：把文件名换成 loader.lua
---  （所以 loader.lua 必须也传到同一个仓库）
--- ══════════════════════════════════════════════════════════
+
+-- 加载器自己的链接：换文件名即可（所以 loader.lua 必须也在同一仓库）
 local LOADER_URL = SCRIPT_URL:gsub("dungeon%.lua", "loader.lua")
 
--- 加时间戳绕开 GitHub 缓存
-local function withBust(url)
+-- ══════════════════════════════════════════════════════════
+--  ★ HTTP 拉取（按实测顺序）★
+--  ① request   —— 实测这个能用
+--  ② game:HttpGet —— 实测返回 nil，放后面兜底
+--  ③ httpget   —— 有些执行器只有这个
+--  返回 body, 错误信息（错误里带状态码，方便定位）
+-- ══════════════════════════════════════════════════════════
+local function httpGet(url)
 	local sep = string.find(url, "?", 1, true) and "&" or "?"
-	return url .. sep .. "t=" .. tostring(os.time())
+	local u = url .. sep .. "t=" .. tostring(os.time())
+	local errs = {}
+
+	-- ① request（syn.request 或全局 request）
+	local req = (syn and syn.request) or request
+	if req then
+		local ok, res = pcall(function()
+			return req({ Url = u, Method = "GET" })
+		end)
+		if ok and type(res) == "table" then
+			-- 不同执行器字段名不一样，都试一下
+			local body = res.Body or res.body or res.Data or res.data
+			if type(body) == "string" and #body > 0 then return body end
+			errs[#errs + 1] = string.format("request 状态=%s Body=%s 长度=%s",
+				tostring(res.StatusCode or res.Status or "?"),
+				type(body), body and #body or "nil")
+		else
+			errs[#errs + 1] = "request ok=" .. tostring(ok) .. " -> " .. tostring(res)
+		end
+	end
+
+	-- ② game:HttpGet
+	if game and game.HttpGet then
+		local ok, res = pcall(function() return game:HttpGet(u) end)
+		if ok and type(res) == "string" and #res > 0 then return res end
+		errs[#errs + 1] = "game:HttpGet ok=" .. tostring(ok) .. " -> " .. tostring(res)
+	end
+
+	-- ③ 全局 httpget
+	if httpget then
+		local ok, res = pcall(function() return httpget(u) end)
+		if ok and type(res) == "string" and #res > 0 then return res end
+		errs[#errs + 1] = "httpget ok=" .. tostring(ok) .. " -> " .. tostring(res)
+	end
+
+	if #errs == 0 then
+		return nil, "这个执行器没有任何可用的 HTTP 方法"
+	end
+	return nil, table.concat(errs, " | ")
 end
 
--- 拉取并执行一段代码；返回 是否成功, 错误信息
+-- 带重试的拉取（实测网络不稳定）
+local function httpGetRetry(url, times, label)
+	times = times or 3
+	local lastErr
+	for i = 1, times do
+		local body, err = httpGet(url)
+		if body then
+			if i > 1 then
+				print(string.format("[Loader] %s 第 %d 次尝试成功", label, i))
+			end
+			return body
+		end
+		lastErr = err
+		if i < times then
+			print(string.format("[Loader] %s 第 %d 次失败，1.5 秒后重试…", label, i))
+			task.wait(1.5)
+		end
+	end
+	return nil, lastErr
+end
+
 local function runUrl(url, what)
-	local ok, src = pcall(function() return game:HttpGet(withBust(url)) end)
-	if not ok or type(src) ~= "string" or #src < 80 then
-		return false, string.format("拉取 %s 失败: %s", what, tostring(src))
+	local src, ferr = httpGetRetry(url, 3, what)
+	if not src then
+		return false, string.format("拉取 %s 失败: %s", what, tostring(ferr))
+	end
+	if #src < 80 then
+		return false, string.format("%s 内容太短（%d 字节），可能拉到了错误页", what, #src)
 	end
 	local fn, err = loadstring(src)
 	if not fn then
@@ -57,12 +118,27 @@ end
 
 -- ══════════════════════════════════════════════════════════
 --  ★ 换服后排队的代码 ★
---  它做的事：重新拉取【加载器自己】并执行。
---  加载器一跑，又会调用 queue_on_teleport 再排一次 —— 自续链。
+--  内嵌一份精简版的多方法拉取（不能只靠 game:HttpGet —— 实测它返回 nil）
 -- ══════════════════════════════════════════════════════════
 local QUEUED = ([[
 	local LOADER = %q
-	-- 换服后角色要几秒才出来，先等它有 Humanoid
+	local function g(u)
+		u = u .. (string.find(u, "?", 1, true) and "&" or "?") .. "t=" .. tostring(os.time())
+		local req = (syn and syn.request) or request
+		if req then
+			local ok, res = pcall(function() return req({ Url = u, Method = "GET" }) end)
+			if ok and type(res) == "table" then
+				local b = res.Body or res.body or res.Data
+				if type(b) == "string" and #b > 0 then return b end
+			end
+		end
+		if game and game.HttpGet then
+			local ok, res = pcall(function() return game:HttpGet(u) end)
+			if ok and type(res) == "string" and #res > 0 then return res end
+		end
+		return nil
+	end
+	-- 等角色出来
 	local PLR = game:GetService("Players").LocalPlayer
 	local waited = 0
 	while waited < 30 do
@@ -72,10 +148,15 @@ local QUEUED = ([[
 		waited = waited + 0.5
 	end
 	task.wait(1)
-	local sep = string.find(LOADER, "?", 1, true) and "&" or "?"
-	local ok, src = pcall(function() return game:HttpGet(LOADER .. sep .. "t=" .. tostring(os.time())) end)
-	if not ok or type(src) ~= "string" then
-		warn("[Loader] 换服后拉取加载器失败: " .. tostring(src))
+	-- 试 3 次
+	local src
+	for i = 1, 3 do
+		src = g(LOADER)
+		if src and #src > 80 then break end
+		task.wait(1.5)
+	end
+	if not src then
+		warn("[Loader] 换服后拉取加载器失败（试了 3 次）—— 请手动再执行一次 loader")
 		return
 	end
 	local fn = loadstring(src)
@@ -85,20 +166,22 @@ local QUEUED = ([[
 -- ══════════════════════════════════════════════════════════
 --  排队 + 立即执行
 -- ══════════════════════════════════════════════════════════
-if queue_on_teleport then
+if AUTO_RECUR and queue_on_teleport then
 	local ok = pcall(function() queue_on_teleport(QUEUED) end)
 	if ok then
 		print("[Loader] 已排队：换服后自动回来（可续链，无限次）")
 	else
 		warn("[Loader] queue_on_teleport 调用失败 —— 换服后需要手动再执行一次。")
 	end
+elseif not AUTO_RECUR then
+	print("[Loader] AUTO_RECUR = false：只拉这一次，不排队续链")
 else
-	warn("[Loader] 这个执行器没有 queue_on_teleport —— 换服后需要手动再执行一次。")
+	warn("[Loader] 没有 queue_on_teleport —— 换服后需要手动再执行一次。")
 end
 
 print("[Loader] 正在拉取 dungeon.lua（首次）…")
 local okRun, errRun = runUrl(SCRIPT_URL, "dungeon.lua")
 if not okRun then
 	warn("[Loader] " .. tostring(errRun))
-	warn("[Loader] 检查：仓库公开吗？URL 是 raw.githubusercontent.com 形式吗？")
+	warn("[Loader] 上面那条里带着每个方法的返回/状态 —— 把它发我就能定位。")
 end
