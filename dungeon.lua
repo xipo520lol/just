@@ -1,3 +1,13 @@
+-- ★★ 重复注入保护：先把上一个实例卸载掉 ★★
+do
+	local __old = getgenv and getgenv().AutoFarm
+	if __old and __old.unload then
+		print("[Farm] 检测到已在运行的旧实例 → 先卸载它")
+		pcall(__old.unload)
+		task.wait(0.2)
+	end
+end
+
 --[[
 	================================================================
 	 AutoFarm.lua — 自动刷怪（输入模拟版）
@@ -2524,12 +2534,15 @@ Chest = (function()
 				task.wait(2.5)          -- ★ 你实测：互动完会【传送走】，
 				                        -- 传送要点时间，所以要等久一点再判定
 				-- ★ 主判据是"玩家被传送走了" ★
-				-- 你说这道门本身没有任何可观测的变化（prompt 留着、
-				-- 部件不动、碰撞和透明度也不变）—— 唯一的信号就是人被送走。
+				-- 但【撤退也会瞬移】—— 进副本时血量从 0 慢慢涨，
+				-- 中途会触发撤退，位移 200 左右就会被误判成"门开了" ✗
+				-- （实测：真正开门传送是 3500 studs，撤退只有 200 上下）
+				-- 所以两条限制：撤退中不判定 + 阈值提到 500。
 				local o = near.obj
 				local opened, why = false, ""
 				local rn = PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart")
-				if snapMy and rn and (rn.Position - snapMy).Magnitude > 30 then
+				if (not retreating) and snapMy and rn
+					and (rn.Position - snapMy).Magnitude > (C.doorTpMin or 500) then
 					opened, why = true, string.format("玩家被传送了 %.0f studs",
 						(rn.Position - snapMy).Magnitude)
 				elseif o.Parent == nil then
@@ -3050,6 +3063,15 @@ Chest = (function()
 			end
 		end,
 		autoPaused = function() return auto.paused end,
+		-- ★ 农场用它判断"现在这一站不许撤退" ★
+		-- 大门/Key门 这种 fight=false 的站：进副本时血量从 0 慢慢涨，
+		-- 会触发撤退 -> 撤退瞬移 -> 被误判成开门传送 -> 没互动就推进下一步。
+		-- 这些站本来马上就要传送走，撤退毫无意义。
+		noRetreatHere = function()
+			if not auto.active then return false end
+			local wp = C.waypoints[auto.idx]
+			return wp ~= nil and wp.fight == false
+		end,
 		-- 农场用它判断：现在别换武器，正拿着某个栏位在用
 		holdSlotActive = function() return holdSlotActive end,
 		-- 注入后自动开始（给游戏一点加载时间）。Xeno 设了"自动执行"就用得上。
@@ -3258,7 +3280,12 @@ local function onHeartbeat(dt)
 	if CONFIG.autoRetreat then
 		local root0 = PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart")
 
-		if not retreating and frac <= CONFIG.hpRetreatAt then
+		-- ★ 副本流程在"不刷怪的站"（大门/Key门）时禁止撤退 ★
+		-- 进副本时血量从 0 慢慢涨，会触发撤退 → 撤退瞬移 →
+		-- 被误判成"开门传送" → 没互动就推进下一步（实测过）。
+		-- 那两站本来马上就要传送走，撤退毫无意义。
+		if (not Chest or not Chest.noRetreatHere or not Chest.noRetreatHere())
+			and not retreating and frac <= CONFIG.hpRetreatAt then
 			retreating = true
 			-- ★ 撤退一开始就把血药冷却"解开" ★
 			-- nextPotion 是"上次喝药 + 30 秒"。如果撤退前刚喝过一次，
@@ -3769,7 +3796,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v48 | 重置角色改成多方法兜底(Health/ChangeState/BreakJoints) ★")
+print("[Farm] ★ 版本 v50 | 修复开门误判:撤退瞬移不算传送(阈值500+撤退中不判)+大门不许撤退 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
