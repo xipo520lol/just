@@ -2985,22 +2985,52 @@ Chest = (function()
 			-- 重置完【等重生完成】再推进第一步，否则会对着还没出来的角色传送。
 			if C.resetOnStart ~= false then
 				task.spawn(function()
-					local hum0 = PLR.Character and PLR.Character:FindFirstChildOfClass("Humanoid")
-					if hum0 then
+					local char0 = PLR.Character
+					local hum0 = char0 and char0:FindFirstChildOfClass("Humanoid")
+					if not hum0 then
+						print("[Chest] ⚠ 第一步之前想重置角色，但拿不到 Character/Humanoid —— 跳过重置")
+					else
 						print("[Chest] 第一步之前：先重置一次角色…")
+						-- ★ 多种方法依次试 ★
+						-- 不同游戏对客户端改 Health 的限制不一样：
+						-- 有的能被服务端覆盖回来，只用 Health=0 会"看起来没生效"。
 						pcall(function() hum0.Health = 0 end)
 						local waited = 0
-						while waited < 20 do
-							local h2 = PLR.Character
-								and PLR.Character:FindFirstChildOfClass("Humanoid")
-							-- 等到换了一个新的、活着的 Humanoid
-							if h2 and h2 ~= hum0 and h2.Health > 0 then break end
-							task.wait(0.5)
-							waited = waited + 0.5
+						local function aliveNew()
+							local c = PLR.Character
+							local h = c and c:FindFirstChildOfClass("Humanoid")
+							return h and h ~= hum0 and h.Health > 0 and c
 						end
-						print(string.format("[Chest] 角色已重置（等了 %.1f 秒），开始第一步", waited))
+						-- 2 秒没死 → ChangeState(Dead)
+						while waited < 2 and not aliveNew() do
+							task.wait(0.2); waited = waited + 0.2
+						end
+						if hum0.Parent and hum0.Health > 0 then
+							print("[Chest]   Health=0 没生效 → 试 ChangeState(Dead)")
+							pcall(function()
+								hum0:ChangeState(Enum.HumanoidStateType.Dead)
+							end)
+						end
+						-- 再过 2 秒还没死 → BreakJoints
+						while waited < 4 and not aliveNew() do
+							task.wait(0.2); waited = waited + 0.2
+						end
+						if hum0.Parent and hum0.Health > 0 then
+							print("[Chest]   ChangeState 也没生效 → 试 BreakJoints")
+							pcall(function() char0:BreakJoints() end)
+						end
+						-- 最后再等重生，最多 20 秒
+						while waited < 20 and not aliveNew() do
+							task.wait(0.5); waited = waited + 0.5
+						end
+						if aliveNew() then
+							print(string.format("[Chest] 角色已重置（等了 %.1f 秒），开始第一步", waited))
+						else
+							print(string.format(
+								"[Chest] ⚠ 重置没能让角色重生（等了 %.1f 秒）—— 照常开始第一步", waited))
+						end
 					end
-					autoAdvance()          -- ★ 重置完成后才走第一步 ★
+					autoAdvance()          -- ★ 不管重置成没成，都要走第一步 ★
 				end)
 			else
 				autoAdvance()
@@ -3739,7 +3769,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v47 | 第一步之前先重置角色(等重生完再开门) | 全自动 | 8站 ★")
+print("[Farm] ★ 版本 v48 | 重置角色改成多方法兜底(Health/ChangeState/BreakJoints) ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
