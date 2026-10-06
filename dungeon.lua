@@ -1519,10 +1519,13 @@ Chest = (function()
 			-- 下一波又跑出去"的来回传送（你反馈的"刷怪四重复传送"）。
 			{ name = "刷怪四", pos = Vector3.new(-8470.1, 1126, 4235), interact = false,
 			  hold = false,
-			  -- ★ 没东西可捡就传送到下一步 ★（你要求的）
-			  -- 不设 needLoot —— 这关有几率什么都不掉，硬等会卡死。
-			  -- lootTimeout 给短一点：确认没东西了就赶紧走。
-			  lootTimeout = 8 },
+			  -- ★ 也要收箱子 ★（loot 默认就是开的，这里写明确）
+			  loot = true,
+			  -- ★ 两个等待要分开 ★（你反馈的"箱子还没刷出来就到了第八步"）
+			  --   lootTimeout：等掉落【出现】最多等多久 —— 要够长，
+			  --                箱子是怪死后过一会儿才刷的，等太短就会提前走。
+			  --   idleTime  ：有东西收完之后，连续多久没事做才走 —— 7 秒。
+			  lootTimeout = 35, idleTime = 7 },
 			-- ★ 第八步：重启地牢 ★
 			-- 切到 6 号位，然后【无限】左键（point 到换服为止）。
 			-- clickFor = 0 表示一直点，直到你按 Y 停。
@@ -2892,8 +2895,10 @@ Chest = (function()
 
 				-- 捡到过了 → 用"连续一段时间没事可做"判定这站完成
 				if not auto.idleSince then auto.idleSince = now end
-				if now - auto.idleSince >= (C.autoLootIdleTime or 4) then
-					print(string.format("[Chest]   %s 完成", wp.name))
+				-- 按站覆盖空闲时长（第七步用 7 秒），默认全局 6 秒
+				local idleNeed = wp.idleTime or C.autoLootIdleTime or 6
+				if now - auto.idleSince >= idleNeed then
+					print(string.format("[Chest]   %s 完成（空闲 %.0f 秒）", wp.name, idleNeed))
 					autoAdvance()
 					return "busy"
 				end
@@ -3710,7 +3715,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v45 | 修复兜底死循环(跳步要重置本站计时) | 全自动 | 8站 ★")
+print("[Farm] ★ 版本 v46 | 第七步:等掉落35s(别提前走)+收完空闲7s才进第八步 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
