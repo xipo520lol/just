@@ -1277,6 +1277,9 @@ end
 
 local function ensureEquipped()
 	if not CONFIG.autoEquip then return end
+	-- ★ 副本流程在"拿着某个栏位一直用"的时候，不许农场把武器换回来 ★
+	-- 否则 autoEquip 每一拍都会把 6 号位道具换成 3 号位武器，道具拿不住。
+	if Chest and Chest.holdSlotActive and Chest.holdSlotActive() then return end
 
 	local now = os.clock()
 	local force = forceEquipOnce          -- 喝完药要强装一次武器
@@ -1508,9 +1511,9 @@ Chest = (function()
 			{ name = "Key门",  pos = Vector3.new(-8470, 1109, 4080), interact = true,
 			  fight = false, loot = false, settle = 0.6 },
 			-- ★ 第七步：刷怪点四 ★
-			-- 进门之后人已经在那儿了，刷怪点是靠近触发的，所以【不传送】，
-			-- 原地打怪 + 收战利品。
-			{ name = "刷怪四", noMove = true, interact = false },
+			-- 进门之后【要传送到这个固定点】再打（你给的坐标）。
+			-- 刷怪点是靠近触发的，传过去就会刷。
+			{ name = "刷怪四", pos = Vector3.new(-8470.1, 1126, 4235), interact = false },
 			-- ★ 第八步：重启地牢 ★
 			-- 切到 6 号位，然后一直左键（点那个道具来重开地牢）。
 			-- clickFor 是点多久（秒）—— 30 秒不够就加大。
@@ -1592,6 +1595,9 @@ Chest = (function()
 	}
 
 	local enabled = false
+	-- ★ "正拿着某个栏位一直用" ★
+	-- 第八步（重启地牢）期间为 true —— 农场那边会读它，不许把武器换回来。
+	local holdSlotActive = false
 	-- ★ 自动流程的状态，必须【声明在最早】★
 	-- kindOf（很前面）要读 auto.active 来判断钥匙要不要认。
 	-- 声明在后面的话，那里读到的是全局 nil，一执行就崩 ——
@@ -2405,16 +2411,27 @@ Chest = (function()
 		-- ★ 一直左键 ★ 用于重启地牢那种"点道具"的操作
 		if wp.clickFor then
 			local dur = tonumber(wp.clickFor) or 30
-			local until_ = os.clock() + dur
 			local n = 0
-			print(string.format("[Chest]   开始连续左键 %.0f 秒（重启地牢）…", dur))
+			-- ★ 一直"拿着"这个栏位 ★（你要求的）
+			-- 光按一次不够：喝药/技能/农场都可能把手上换成别的。
+			-- 所以整个过程中每隔一小段就【补按一次】这个栏位键，
+			-- 保证一直是这个道具在手上。
+			local slotKey = wp.slot and SLOT_KEYS[wp.slot] or nil
+			holdSlotActive = slotKey ~= nil
+			print(string.format("[Chest]   开始连续左键 %.0f 秒（拿着 %s 号位，重启地牢）…",
+				dur, tostring(wp.slot or "?")))
 			-- 按次数循环而不是看时钟：替身里 task.wait 不推进 os.clock
 			local steps = math.max(1, math.floor(dur / 0.1))
-			for _ = 1, steps do
+			for i = 1, steps do
+				-- 每 10 次（约 1 秒）补按一次栏位键，保证道具还在手上
+				if slotKey and (i - 1) % 10 == 0 then
+					pressKey(slotKey)
+				end
 				clickOnce()
 				n = n + 1
 				task.wait(jitter(0.1))
 			end
+			holdSlotActive = false
 			print(string.format("[Chest]   连续左键结束（点了 %d 次）", n))
 		end
 
@@ -2864,6 +2881,8 @@ Chest = (function()
 			end
 		end,
 		autoPaused = function() return auto.paused end,
+		-- 农场用它判断：现在别换武器，正拿着某个栏位在用
+		holdSlotActive = function() return holdSlotActive end,
 		-- 注入后自动开始（给游戏一点加载时间）。Xeno 设了"自动执行"就用得上。
 		autoStartSoon = function()
 			if C.autoStart ~= true then return end
@@ -3574,7 +3593,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v33 | 换服自动重跑(填 reinjectUrl) + autoStart | 8站 ★")
+print("[Farm] ★ 版本 v35 | 第七步用固定传送点 -8470.1,1126,4235 | 8站 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
