@@ -1518,7 +1518,11 @@ Chest = (function()
 			-- 这站要打怪，玩家得跟着怪跑；拉回来会变成"打一下被拽回、
 			-- 下一波又跑出去"的来回传送（你反馈的"刷怪四重复传送"）。
 			{ name = "刷怪四", pos = Vector3.new(-8470.1, 1126, 4235), interact = false,
-			  hold = false },
+			  hold = false,
+			  -- ★ 没东西可捡就传送到下一步 ★（你要求的）
+			  -- 不设 needLoot —— 这关有几率什么都不掉，硬等会卡死。
+			  -- lootTimeout 给短一点：确认没东西了就赶紧走。
+			  lootTimeout = 8 },
 			-- ★ 第八步：重启地牢 ★
 			-- 切到 6 号位，然后【无限】左键（point 到换服为止）。
 			-- clickFor = 0 表示一直点，直到你按 Y 停。
@@ -2463,6 +2467,14 @@ Chest = (function()
 
 			-- ★ ② 附近有交互件就用官方 API，按住同样的时长 ★
 			local near = findNearestInteractable(pos, C.interactRange or 40)
+			-- 交互【之前】拍个快照：门开了以后 prompt 可能还留着，
+			-- 所以不能只看 prompt，得看"有没有任何东西变了"。
+			local snapPart = near and near.obj or nil
+			local snapPos = snapPart and snapPart.Position or nil
+			local snapCol = snapPart and snapPart.CanCollide or nil
+			local snapTr  = snapPart and snapPart.Transparency or nil
+			local snapRoot = PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart")
+			local snapMy = snapRoot and snapRoot.Position or nil
 			if near and near.prompt then
 				local ph = math.max(tonumber(near.prompt.HoldDuration) or 0, hold)
 				pcall(function() near.prompt:InputHoldBegin() end)
@@ -2488,25 +2500,42 @@ Chest = (function()
 			-- 判定：刚才用的那个交互件如果【还在且还启用】，就认为门没开，
 			-- 按同样的方式再按一次，最多 interactAttempts 次。
 			local attempts = tonumber(C.interactAttempts) or 4
+			if near and near.obj then
 			for i = 2, attempts do
-				task.wait(0.6)          -- 给游戏一点处理时间
-				local again = findNearestInteractable(pos, C.interactRange or 40)
-				local stillThere = again and again.obj == near and again.obj.Parent ~= nil
-				-- prompt 被禁用/消失也算"门开了"
-				if stillThere and again.prompt ~= nil
-					and again.prompt.Enabled == false then
-					stillThere = false
+				task.wait(2.5)          -- ★ 你实测：互动完会【传送走】，
+				                        -- 传送要点时间，所以要等久一点再判定
+				-- ★ 主判据是"玩家被传送走了" ★
+				-- 你说这道门本身没有任何可观测的变化（prompt 留着、
+				-- 部件不动、碰撞和透明度也不变）—— 唯一的信号就是人被送走。
+				local o = near.obj
+				local opened, why = false, ""
+				local rn = PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart")
+				if snapMy and rn and (rn.Position - snapMy).Magnitude > 30 then
+					opened, why = true, string.format("玩家被传送了 %.0f studs",
+						(rn.Position - snapMy).Magnitude)
+				elseif o.Parent == nil then
+					opened, why = true, "部件消失"
+				elseif near.prompt and near.prompt.Enabled == false then
+					opened, why = true, "prompt 禁用"
+				elseif snapPos and (o.Position - snapPos).Magnitude > 2 then
+					opened, why = true, string.format("门移动了 %.1f studs",
+						(o.Position - snapPos).Magnitude)
+				elseif snapCol ~= nil and o.CanCollide ~= snapCol then
+					opened, why = true, "CanCollide 变化"
+				elseif snapTr ~= nil and math.abs(o.Transparency - snapTr) > 0.05 then
+					opened, why = true, "透明度变化"
 				end
-				if not stillThere then
-					print(string.format("[Chest]   %s 开门确认通过（第 %d 次尝试）", wp.name, i - 1))
+				if opened then
+					print(string.format("[Chest]   %s 开门确认通过（%s，第 %d 次尝试）",
+						wp.name, why, i - 1))
 					break
 				end
 				print(string.format("[Chest]   %s 还没开（第 %d 次重试）…", wp.name, i))
-				if again and again.prompt then
-					local ph2 = math.max(tonumber(again.prompt.HoldDuration) or 0, hold)
-					pcall(function() again.prompt:InputHoldBegin() end)
+				if near.prompt then
+					local ph2 = math.max(tonumber(near.prompt.HoldDuration) or 0, hold)
+					pcall(function() near.prompt:InputHoldBegin() end)
 					task.wait(ph2 + 0.3)
-					pcall(function() again.prompt:InputHoldEnd() end)
+					pcall(function() near.prompt:InputHoldEnd() end)
 				end
 				sendKey(C.keyOpen, true)
 				task.wait(hold)
@@ -2516,6 +2545,7 @@ Chest = (function()
 						"[Chest] ⚠ %s：按了 %d 次仍没确认开门，继续往下走（不影响流程）",
 						wp.name, attempts))
 				end
+			end
 			end
 
 			-- ★ ④ 互动完把武器装回来 ★
@@ -2617,10 +2647,17 @@ Chest = (function()
 			end
 
 			-- 打怪优先：还有怪就等它打完，别去抢传送
+			--
+			-- ★ 但 quiet = false 的站（大门）不能挡 ★
+			-- 大门互动完会把你【传送到刷怪一的怪堆里】，那边永远有目标 ——
+			-- 挡下去第 1 步就永远不推进（实测：卡在第 1 步 12 秒以上）。
+			-- 大门只负责开门，开完就该走。
 			if hasTarget then
 				auto.sawMobs = true
 				auto.lastMobAt = now          -- 记下最近一次"确实有怪"
-				return "busy"
+				if wp.quiet ~= false then
+					return "busy"
+				end
 			end
 
 			-- ★ 别在打怪中途判定完成 ★
@@ -2773,6 +2810,18 @@ Chest = (function()
 					local waited = now - auto.stationAt
 					-- 按站覆盖：收战利品那站用 10 秒，其他站用全局默认
 					local lim = wp.lootTimeout or C.autoLootTimeout or 25
+					-- ★ wp.needLoot：这站必须真的捡到东西才走 ★（你要求的）
+					-- 不等超时 —— 没捡到就继续等，直到捡到或你按 Y 停。
+					if wp.needLoot then
+						local t20 = math.floor(waited / 20)
+						if t20 > (auto.lastNeedLootTick or -1) then
+							auto.lastNeedLootTick = t20
+							print(string.format(
+								"[Chest]   %s 还没收到东西，继续等…（已 %.0f 秒，按 Y 可停）",
+								wp.name, waited))
+						end
+						return "busy"
+					end
 					-- ★ 不暂停 ★ 过了时限只提醒，继续等
 					if waited < lim then
 						local t10 = math.floor(waited / 10)
@@ -3610,7 +3659,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v37 | 第八步无限左键(6号位,按Y停) + 修重复传送 | 8站 ★")
+print("[Farm] ★ 版本 v42 | 修复:大门被传送到怪堆后卡死(quiet=false的站不被怪挡住) ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
