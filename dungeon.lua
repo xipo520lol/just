@@ -2351,6 +2351,15 @@ Chest = (function()
 		auto.idx = auto.idx + 1
 		auto.phase = "go"
 		auto.idleSince = nil
+		-- ★ stationAt 必须在这里重置 ★
+		-- 它是"这一站什么时候开始的"，原来只在 go 阶段完成时才设置 ——
+		-- 但兜底跳步走的是 autoAdvance，不会经过 go 阶段 ✗
+		-- 于是 now - stationAt 一直停在超时值上，每一帧都再跳一次：
+		-- 实测就是同一秒里无限刷"卡了 1718 秒 → 跳第八步 → 从第 1 步重来"。
+		auto.stationAt = os.clock()
+		auto.waitAcc, auto.waitSince = 0, nil
+		auto.lastMobAt = os.clock()
+		auto.spawnGaveUp = false
 		-- 设成"过去"：让 go 阶段的重试节流【不耽误第一次动作】
 		-- （否则刚进这一站要白等 3 秒才传送）
 		auto.phaseAt = os.clock() - 10
@@ -3042,7 +3051,10 @@ Chest = (function()
 		autoStatus = function()
 			local wp = C.waypoints[auto.idx]
 			return { active = auto.active, idx = auto.idx, total = #C.waypoints,
-				phase = auto.phase, name = wp and wp.name or nil }
+				phase = auto.phase, name = wp and wp.name or nil,
+				-- 当前这一站已经待了多久 —— 兜底跳步后必须被重置，
+				-- 否则会每帧都判"超时"、无限跳（测试 42 就是验它）
+				elapsed = auto.stationAt and (os.clock() - auto.stationAt) or 0 }
 		end,
 		setOpenQuestion = function(v)
 			C.openQuestion = v and true or false
@@ -3698,7 +3710,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v44 | 全自动(autoStart) + 兜底:任一步超700s跳第8步重启地牢 ★")
+print("[Farm] ★ 版本 v45 | 修复兜底死循环(跳步要重置本站计时) | 全自动 | 8站 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
