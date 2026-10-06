@@ -1553,11 +1553,13 @@ Chest = (function()
 		fightQuietTime   = 5.0,
 		-- 锁着的目标超过这么久没进展 → 强制放掉（防"wait 卡死"）
 		lockStuckTime    = 10,
+		-- ★ 兜底：任何一步待超过这么久 → 跳到第 8 步（重启地牢）★（你要求的）
+		-- 哪一步卡住都能靠"重开地牢再来一遍"自救。
+		autoMaxStay      = 700,
 
-		-- ★ 注入后自动开始副本流程 ★
-		-- 配合 Xeno 的"自动执行"用：注进来就自动跑，不用按 Y。
-		-- 不想自动开始就改成 false。
-		autoStart = false,
+		-- ★ 注入后自动开始副本流程 ★（你要求的：改成自动完成）
+		-- 注进来就自己跑，不用按 Y。想手动控制就改成 false。
+		autoStart = true,
 		autoStartDelay = 3.0,      -- 等游戏加载/角色就位再开始（秒）
 
 		-- ★ 换服后自动重跑 ★
@@ -2439,6 +2441,11 @@ Chest = (function()
 					print("[Chest]   已停止（按了 Y）")
 					break
 				end
+				-- ★ 到全局上限就停手 ★ 交给 autoStep 去跳第八步
+				if C.autoMaxStay and (i * 0.1) > C.autoMaxStay then
+					print(string.format("[Chest]   已达 %.0f 秒上限，停止左键", C.autoMaxStay))
+					break
+				end
 				-- 每 10 次（约 1 秒）补按一次栏位键，保证物品还在手上
 				if slotKey and (i - 1) % 10 == 0 then
 					pressKey(slotKey)
@@ -2586,7 +2593,35 @@ Chest = (function()
 	end
 
 	local function autoStep(hasTarget)
-		if not auto.active then return "skip" end		-- ★ 防重入 ★
+		if not auto.active then return "skip" end
+		-- ★ 兜底：某一站待太久 → 重新从第 1 步开始 ★（你要求的）
+		-- 第八步是无限左键等换服 —— 万一没换成，就会永远卡在那。
+		-- 必须放在 busy 检查【之前】：第八步的连点跑在独立线程里，
+		-- auto.busy 会一直是 true，放后面就永远轮不到这个检查。
+		do
+			local now0 = os.clock()
+			local wp0 = C.waypoints[auto.idx]
+			local lim = C.autoMaxStay or 700
+			if auto.stationAt and wp0 and (now0 - auto.stationAt) > lim then
+				auto.paused = false
+				if auto.idx >= #C.waypoints then
+					-- 已经在第八步了 —— 再跳第八步就是原地打转，干脆从头再来
+					print(string.format(
+						"[Chest] ⚠ %s 待了 %.0f 秒（上限 %.0f）→ 已经在最后一步，从第 1 步重来",
+						wp0.name, now0 - auto.stationAt, lim))
+					auto.idx = 0
+				else
+					-- ★ 跳到第八步（重启地牢）★
+					print(string.format(
+						"[Chest] ⚠ %s 卡了 %.0f 秒（上限 %.0f）→ 直接跳到第 8/8 步：重启地牢",
+						wp0.name, now0 - auto.stationAt, lim))
+					auto.idx = #C.waypoints - 1   -- autoAdvance 会 +1 → 落到第八步
+				end
+				autoAdvance()
+				return "busy"
+			end
+		end
+		-- ★ 防重入 ★
 		-- onHeartbeat 每帧都调进来，而"go"阶段要 yield（长按 E 5 秒）。
 		-- 不锁的话等待期间会被并发重入 —— 同一站被重复执行 20 次，
 		-- 20 个 5 秒长按叠在一起，门直接开不了（截图里刷屏就是这个）。
@@ -2956,6 +2991,10 @@ Chest = (function()
 			print(string.format("[Chest] 已设置自动开始，%.0f 秒后启动（想取消就按 Y）", d))
 			task.spawn(function()
 				task.wait(d)
+				-- ★ 触发时再检查一次 ★
+				-- 排队的这 3 秒里配置可能被改（测试就是这么关掉它的），
+				-- 只在排队时判断的话，改了也没用。
+				if C.autoStart ~= true then return end
 				if not auto.active then
 					print("[Chest] 自动开始副本流程")
 					-- 直接调内部逻辑（避免重复定义）
@@ -3659,7 +3698,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v42 | 修复:大门被传送到怪堆后卡死(quiet=false的站不被怪挡住) ★")
+print("[Farm] ★ 版本 v44 | 全自动(autoStart) + 兜底:任一步超700s跳第8步重启地牢 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
