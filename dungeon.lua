@@ -2980,7 +2980,31 @@ Chest = (function()
 			auto.lastMissTick = -1
 			if chestStartFarm then chestStartFarm() end
 			print("[Chest] ═══ 开始自动完成一二部分 ═══")
-			autoAdvance()
+			-- ★ 第一步之前先重置一次角色 ★（你要求的）
+			-- 换服回来时人可能还在旧位置/旧状态，重置一下从出生点开始。
+			-- 重置完【等重生完成】再推进第一步，否则会对着还没出来的角色传送。
+			if C.resetOnStart ~= false then
+				task.spawn(function()
+					local hum0 = PLR.Character and PLR.Character:FindFirstChildOfClass("Humanoid")
+					if hum0 then
+						print("[Chest] 第一步之前：先重置一次角色…")
+						pcall(function() hum0.Health = 0 end)
+						local waited = 0
+						while waited < 20 do
+							local h2 = PLR.Character
+								and PLR.Character:FindFirstChildOfClass("Humanoid")
+							-- 等到换了一个新的、活着的 Humanoid
+							if h2 and h2 ~= hum0 and h2.Health > 0 then break end
+							task.wait(0.5)
+							waited = waited + 0.5
+						end
+						print(string.format("[Chest] 角色已重置（等了 %.1f 秒），开始第一步", waited))
+					end
+					autoAdvance()          -- ★ 重置完成后才走第一步 ★
+				end)
+			else
+				autoAdvance()
+			end
 		end,
 		stopAuto = function()
 			-- ★ 只停不清进度 ★ 这样再按 Y 能从这一站继续
@@ -3715,7 +3739,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v46 | 第七步:等掉落35s(别提前走)+收完空闲7s才进第八步 ★")
+print("[Farm] ★ 版本 v47 | 第一步之前先重置角色(等重生完再开门) | 全自动 | 8站 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
