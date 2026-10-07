@@ -75,32 +75,32 @@ local function httpGet(url)
 	return nil, table.concat(errs, " | ")
 end
 
--- 带重试的拉取（实测网络不稳定）
-local function httpGetRetry(url, times, label)
-	times = times or 3
-	local lastErr
-	for i = 1, times do
+-- 带重试的拉取 = 【无限重试直到成功】
+-- 实测网络不稳定：同一个链接有时 200、有时超时。
+-- 所以不设上限 —— 一直试，每隔几秒一次，成功为止。
+-- （放在独立线程里调用，不会挡住排队/UI。）
+local function httpGetForever(url, label)
+	local n = 0
+	while true do
+		n = n + 1
 		local body, err = httpGet(url)
 		if body then
-			if i > 1 then
-				print(string.format("[Loader] %s 第 %d 次尝试成功", label, i))
+			if n > 1 then
+				print(string.format("[Loader] %s 第 %d 次尝试成功", label, n))
 			end
 			return body
 		end
-		lastErr = err
-		if i < times then
-			print(string.format("[Loader] %s 第 %d 次失败，1.5 秒后重试…", label, i))
-			task.wait(1.5)
+		-- 第 1 次和之后每 5 次报一次，别刷屏
+		if n == 1 or n % 5 == 0 then
+			print(string.format("[Loader] %s 第 %d 次失败，3 秒后继续重试…（%s）",
+				label, n, tostring(err)))
 		end
+		task.wait(3)
 	end
-	return nil, lastErr
 end
 
 local function runUrl(url, what)
-	local src, ferr = httpGetRetry(url, 3, what)
-	if not src then
-		return false, string.format("拉取 %s 失败: %s", what, tostring(ferr))
-	end
+	local src = httpGetForever(url, what)
 	if #src < 80 then
 		return false, string.format("%s 内容太短（%d 字节），可能拉到了错误页", what, #src)
 	end
@@ -148,16 +148,17 @@ local QUEUED = ([[
 		waited = waited + 0.5
 	end
 	task.wait(1)
-	-- 试 3 次
+	-- ★ 无限重试直到拉到 ★（换服后也一样，网络不稳时别放弃）
 	local src
-	for i = 1, 3 do
-		src = g(LOADER)
-		if src and #src > 80 then break end
-		task.wait(1.5)
-	end
-	if not src then
-		warn("[Loader] 换服后拉取加载器失败（试了 3 次）—— 请手动再执行一次 loader")
-		return
+	local n = 0
+	while not src do
+		n = n + 1
+		local s = g(LOADER)
+		if s and #s > 80 then src = s break end
+		if n == 1 or n % 5 == 0 then
+			warn(string.format("[Loader] 换服后拉取加载器第 %d 次失败，3 秒后继续…", n))
+		end
+		task.wait(3)
 	end
 	local fn = loadstring(src)
 	if fn then pcall(fn) end
@@ -179,9 +180,13 @@ else
 	warn("[Loader] 没有 queue_on_teleport —— 换服后需要手动再执行一次。")
 end
 
-print("[Loader] 正在拉取 dungeon.lua（首次）…")
-local okRun, errRun = runUrl(SCRIPT_URL, "dungeon.lua")
-if not okRun then
-	warn("[Loader] " .. tostring(errRun))
-	warn("[Loader] 上面那条里带着每个方法的返回/状态 —— 把它发我就能定位。")
-end
+print("[Loader] 正在拉取 dungeon.lua（首次，失败会自动无限重试）…")
+-- ★ 放独立线程：里面有"无限重试"，不能挡住排队和后面的代码 ★
+task.spawn(function()
+	local okRun, errRun = runUrl(SCRIPT_URL, "dungeon.lua")
+	if not okRun then
+		-- 这里只会在"拉到了但内容有问题（太短/语法错/执行错）"时才到
+		warn("[Loader] " .. tostring(errRun))
+		warn("[Loader] 内容问题不是网络问题 —— 检查 GitHub 上那个文件本身。")
+	end
+end)

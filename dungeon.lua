@@ -1569,6 +1569,9 @@ Chest = (function()
 		-- ★ 兜底：任何一步待超过这么久 → 跳到第 8 步（重启地牢）★（你要求的）
 		-- 哪一步卡住都能靠"重开地牢再来一遍"自救。
 		autoMaxStay      = 700,
+		-- ★ 兜底：命快没了 → 跳第 8 步重启 ★（你要求的）
+		-- 你有 4 条命，死满这个次数（= 只剩 1 条）就重开。
+		maxDeaths        = 3,
 
 		-- ★ 注入后自动开始副本流程 ★（你要求的：改成自动完成）
 		-- 注进来就自己跑，不用按 Y。想手动控制就改成 false。
@@ -2619,6 +2622,49 @@ Chest = (function()
 
 	local function autoStep(hasTarget)
 		if not auto.active then return "skip" end
+		-- ★ 兜底：命快没了 → 跳到第 8 步重启地牢 ★（你要求的）
+		-- 你有 4 条命，剩最后 1 条（= 死过 3 次）就重开，别再硬撑。
+		-- 生命数客户端不一定读得到，但"死几次"数得出来（角色换了就 +1）。
+		do
+			local ch = PLR.Character
+			local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+			-- 第一次记录角色；之后角色变了 = 死过一次（重生）
+			if auto.lastChar == nil then
+				auto.lastChar = ch
+			elseif ch ~= nil and ch ~= auto.lastChar then
+				auto.lastChar = ch
+				if auto.idx >= 2 then          -- 第 1 步的"重置角色"不算死
+					auto.deaths = (auto.deaths or 0) + 1
+					print(string.format("[Chest] 检测到一次死亡（本次流程已死 %d 次）",
+						auto.deaths))
+				end
+			end
+			if hum and hum.Health <= 0 and auto.idx >= 2 then
+				-- 死了但还没重生，也算（防止重生很快、角色对象没换）
+				if not auto.deathPending then
+					auto.deathPending = true
+					auto.deaths = (auto.deaths or 0) + 1
+					print(string.format("[Chest] 检测到一次死亡（本次流程已死 %d 次）",
+						auto.deaths))
+				end
+			elseif hum and hum.Health > 0 then
+				auto.deathPending = false
+			end
+
+			local maxDeaths = C.maxDeaths
+			if maxDeaths and (auto.deaths or 0) >= maxDeaths then
+				auto.deaths = 0
+				auto.paused = false
+				print(string.format(
+					"[Chest] ⚠ 已死 %d 次（4 条命剩最后 1 条）→ 直接跳到第 8/8 步：重启地牢",
+					maxDeaths))
+				auto.idx = #C.waypoints - 1
+				auto.stationAt = os.clock()
+				autoAdvance()
+				return "busy"
+			end
+		end
+
 		-- ★ 兜底：某一站待太久 → 重新从第 1 步开始 ★（你要求的）
 		-- 第八步是无限左键等换服 —— 万一没换成，就会永远卡在那。
 		-- 必须放在 busy 检查【之前】：第八步的连点跑在独立线程里，
@@ -3824,7 +3870,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v51 | 喝完药硬换回武器(修一直拿药瓶) + 撤退30%/回复60% ★")
+print("[Farm] ★ 版本 v52 | 兜底:死满3次(4条命剩1条)跳第8步重启 + 单站超700s跳第8步 ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
