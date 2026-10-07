@@ -130,10 +130,10 @@ local CONFIG = {
 	-- 保命：副本里贴脸容易被一起秒。
 	-- 血掉到阈值就撤到高处悬停，回到阈值再继续打。
 	autoRetreat   = true,
-	hpRetreatAt   = 0.2,    -- HP 低于这个比例 → 撤（按你要求从 0.55 降到 0.2）
+	hpRetreatAt   = 0.30,   -- ★ 撤退线：HP 低于 30% → 撤 ★（你要求的，原 0.2）
 	                        -- 注意：阈值越低意味着你会硬吃更多伤害才撤。
 	                        -- 想让它在 20% 就触发、又要回得快，把 hpResumeAt 也降下来。
-	hpResumeAt    = 0.70,   -- ★ 撤退取消线：HP 回到这个比例 → 继续打 ★（你要求的，原 0.85）
+	hpResumeAt    = 0.60,   -- ★ 撤退取消线：HP 回到 60% → 继续打 ★（你要求的，原 0.7）
 	retreatUp     = 200,    -- 撤到比怪高多少 studs（按你要求从 80 拉高到 200）
 	                        -- 太高可能撞到副本天花板/地形，卡住就调小
 	retreatAway   = 40,     -- 同时水平拉开多少 studs（脱离范围攻击）
@@ -3200,6 +3200,10 @@ local function onHeartbeat(dt)
 					or (CONFIG.potionCooldown or 30)
 				nextPotion = now2 + cd
 				pressKey(slotKey)
+				-- ★ 记下"现在手上是什么"= 刚装上的药瓶 ★
+				-- 喝完要用它判断"药是不是还拿在手上"，还拿着就继续按武器键。
+				local potionTool = PLR.Character
+					and PLR.Character:FindFirstChildWhichIsA("Tool") or nil
 				-- 装备之后还要"用"一下。这个游戏的用法是【装备后左键】。
 				--
 				-- ★ 为什么要连点 0.5 秒而不是点一下 ★
@@ -3227,7 +3231,31 @@ local function onHeartbeat(dt)
 					activateTool()
 				end
 				potionsUsed = potionsUsed + 1
-				forceEquipOnce = true       -- 喝完把武器装回来
+				-- ★ 喝完把武器换回来（硬保证）★
+				-- 只设 forceEquipOnce 不够：农场的装备逻辑有退避（失败几次会
+				-- 拉长间隔），而且【死亡重生会换一个新角色】—— 结果药一直拿在
+				-- 手上（你反馈的"死一次后一直拿着血药"）。
+				-- 所以再直接按一次武器栏位键，硬换回来。
+				forceEquipOnce = true
+				do
+					local wsk = SLOT_KEYS[CONFIG.equipSlot or 0]
+					if wsk then
+						-- 按几次，确保换回来（有的游戏换装要一下，也有的会被
+						-- 死亡重生的新角色冲掉 —— 重试几次最稳）
+						for i = 1, 3 do
+							task.wait(jitter(0.4))
+							local ch = PLR.Character
+							local held = ch and ch:FindFirstChildWhichIsA("Tool")
+							-- 手上没工具、或已经不是那个药瓶了 → 说明换回来了
+							if not held or held ~= potionTool then break end
+							pressKey(wsk)
+							if i == 1 then
+								print(string.format("[Farm] 喝完药，按 %d 键换回武器",
+									CONFIG.equipSlot or 0))
+							end
+						end
+					end
+				end
 				print(string.format("[Farm] 喝血药（当前 %.0f%%），下次 %.0fs 后",
 					pf * 100, CONFIG.potionCooldown or 30))
 			end
@@ -3796,7 +3824,7 @@ end
 
 print("[Farm] 已加载 | Insert 开关 | End 卸载 | K 自动开箱 | 面板可拖动、点标题折叠")
 print("[Chest] 副本模式：先打怪，怪清完了自动去开箱子（需要箱子符合 CONFIG 里的关键词）")
-print("[Farm] ★ 版本 v50 | 修复开门误判:撤退瞬移不算传送(阈值500+撤退中不判)+大门不许撤退 ★")
+print("[Farm] ★ 版本 v51 | 喝完药硬换回武器(修一直拿药瓶) + 撤退30%/回复60% ★")
 -- ★ 注入后自动开始副本流程 ★
 -- 配合 Xeno 的"自动执行"：注进来就自己跑，不用按 Y。
 if Chest and Chest.autoStartSoon then Chest.autoStartSoon() end
