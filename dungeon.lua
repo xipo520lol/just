@@ -2628,27 +2628,26 @@ Chest = (function()
 		do
 			local ch = PLR.Character
 			local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-			-- 第一次记录角色；之后角色变了 = 死过一次（重生）
+			-- ★ 只在"角色换了"这一条路径上计数 ★
+			-- 原来血<=0 和角色更换各数一次 —— 可死亡必然是
+			-- "血归零 → 重生换角色"，一次死亡会被数成两次 ✗
+			-- 现在：血<=0 只做标记，真正 +1 只发生在角色更换时。
 			if auto.lastChar == nil then
 				auto.lastChar = ch
 			elseif ch ~= nil and ch ~= auto.lastChar then
+				local wasDead = auto.deathPending
 				auto.lastChar = ch
+				auto.deathPending = false
 				if auto.idx >= 2 then          -- 第 1 步的"重置角色"不算死
 					auto.deaths = (auto.deaths or 0) + 1
-					print(string.format("[Chest] 检测到一次死亡（本次流程已死 %d 次）",
-						auto.deaths))
+					print(string.format(
+						"[Chest] 检测到一次死亡（本次流程已死 %d 次%s）",
+						auto.deaths, wasDead and "" or "，没看到血归零但角色换了"))
 				end
 			end
-			if hum and hum.Health <= 0 and auto.idx >= 2 then
-				-- 死了但还没重生，也算（防止重生很快、角色对象没换）
-				if not auto.deathPending then
-					auto.deathPending = true
-					auto.deaths = (auto.deaths or 0) + 1
-					print(string.format("[Chest] 检测到一次死亡（本次流程已死 %d 次）",
-						auto.deaths))
-				end
-			elseif hum and hum.Health > 0 then
-				auto.deathPending = false
+			-- 血归零 → 只标记，不在这里 +1（避免和上面重复计数）
+			if hum and hum.Health <= 0 then
+				auto.deathPending = true
 			end
 
 			local maxDeaths = C.maxDeaths
@@ -3035,6 +3034,9 @@ Chest = (function()
 			auto.active, auto.idx, auto.phase = true, 0, "idle"
 			auto.engaged, auto.paused = true, false
 			auto.busy = false
+			-- ★ 死亡计数必须在新一轮清零 ★
+			-- 原来不清 —— 第一轮死够 3 次后，之后每轮开局就立刻触发跳步 ✗
+			auto.deaths, auto.deathPending, auto.lastChar = 0, false, PLR.Character
 			auto.idleSince, auto.phaseAt = nil, os.clock()
 			auto.lastMissTick = -1
 			if chestStartFarm then chestStartFarm() end
@@ -3148,6 +3150,7 @@ Chest = (function()
 			auto.active, auto.idx, auto.phase = false, 0, "idle"
 			auto.engaged, auto.paused, auto.busy = false, false, false
 			auto.sawMobs, auto.keysAllowed, auto.rangeBoost = false, true, 0
+			auto.deaths, auto.deathPending, auto.lastChar = 0, false, PLR.Character
 			auto.lastMobAt, auto.spawnGaveUp = os.clock(), false
 		end,
 		-- 回位用它判断：流程在跑（或暂停中）就别把玩家拽回原位
