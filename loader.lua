@@ -155,8 +155,8 @@ local QUEUED = ([[
 		n = n + 1
 		local s = g(LOADER)
 		if s and #s > 80 then src = s break end
-		if n == 1 or n % 5 == 0 then
-			warn(string.format("[Loader] 换服后拉取加载器第 %d 次失败，3 秒后继续…", n))
+		if n == 1 or n %% 5 == 0 then
+			warn(string.format("[Loader] 换服后拉取加载器第 %%d 次失败，3 秒后继续…", n))
 		end
 		task.wait(3)
 	end
