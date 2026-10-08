@@ -155,10 +155,22 @@ local function httpGetForever(url, label)
 	end
 end
 
+-- ★ 本地缓存文件名 ★
+-- 首次成功拉到之后，把源码写进这个文件。换服后【先读本地】，
+-- 读不到再走网络 —— 这样换服完全不受网络时好时坏的影响。
+-- （执行器的 workspace 文件在换服后依然存在）
+local CACHE_FILE = "dungeon_cache.lua"
+
 local function runUrl(url, what)
 	local src = httpGetForever(url, what)
 	if #src < 80 then
 		return false, string.format("%s 内容太短（%d 字节），可能拉到了错误页", what, #src)
+	end
+	-- ★ 存一份到本地，供换服后直接读取 ★
+	if writefile then
+		local okW = pcall(writefile, CACHE_FILE, src)
+		if okW then print(string.format("[Loader] 已缓存到本地：%s", CACHE_FILE))
+		else print("[Loader] 本地缓存写入失败（不影响本次运行）") end
 	end
 	local fn, err = loadstring(src)
 	if not fn then
@@ -180,6 +192,7 @@ end
 -- ══════════════════════════════════════════════════════════
 local QUEUED = ([[
 	local RAW = %q
+	local CACHE = %q
 	local function toJs(u)
 		-- 注意：这里是【模板内部】。Lua 模式里的百分号必须写成两个，
 		-- 否则外层 format 会把它当占位符，报 missing argument。
@@ -197,18 +210,25 @@ local QUEUED = ([[
 		if req then
 			-- ★ 带 User-Agent，否则 GitHub 回 403 ★
 			local ok, res = pcall(function()
-				return req({ Url = u, Method = "GET", Headers = { ["User-Agent"] = UA, ["Accept"] = "*/*" } })
+				return req({
+					Url = u, Method = "GET",
+					Headers = { ["User-Agent"] = UA, ["Accept"] = "*/*" },
+					HttpHeaders = { ["User-Agent"] = UA, ["Accept"] = "*/*" },
+					UserAgent = UA,
+				})
 			end)
 			if ok and type(res) == "table" then
 				local b = res.Body or res.body or res.Data
 				if type(b) == "string" and #b > 0 then return b end
+				return nil, string.format("状态=%%s", tostring(res.StatusCode or res.Status or "?"))
 			end
 		end
 		if game and game.HttpGet then
 			local ok, res = pcall(function() return game:HttpGet(u) end)
 			if ok and type(res) == "string" and #res > 0 then return res end
+			return nil, "HttpGet=nil"
 		end
-		return nil
+		return nil, "没有可用的 HTTP 方法"
 	end
 
 	-- 等角色出来
@@ -222,22 +242,50 @@ local QUEUED = ([[
 	end
 	task.wait(1)
 
-	-- ★ 无限重试直到拉到，两个源轮着试 ★
+	-- ★★ 第一步：先读本地缓存 ★★
+	-- 换服后网络常常拉不到，但本地文件一直在。
+	-- 有缓存就直接用，完全不需要网络。
 	local src
+	if readfile and isfile then
+		local okf, has = pcall(isfile, CACHE)
+		if okf and has then
+			local okr, cached = pcall(readfile, CACHE)
+			if okr and type(cached) == "string" and #cached > 80 then
+				src = cached
+				print(string.format("[Loader] 换服后已从本地缓存加载（%%d 字节，不用网络）", #src))
+			end
+		end
+	end
+
+	-- ★★ 第二步：本地没有才走网络，两个源轮着试，无限重试 ★★
 	local n = 0
 	while not src do
 		n = n + 1
-		local s = g(RAW)
-		if not (s and #s > 80) and RAW2 then s = g(RAW2) end
-		if s and #s > 80 then src = s break end
-		if n == 1 or n %% 5 == 0 then
-			warn(string.format("[Loader] 换服后拉取加载器第 %%d 次失败，3 秒后继续…", n))
+		local detail = {}
+		for i, u in ipairs({ RAW, RAW2 }) do
+			if u then
+				local s, e = g(u)
+				if s and #s > 80 then src = s
+					print(string.format("[Loader] 换服后从源 %%d 拉到（第 %%d 次尝试）", i, n))
+					break
+				end
+				detail[#detail + 1] = string.format("源%%d[%%s]", i, tostring(e))
+			end
 		end
-		task.wait(3)
+		if not src then
+			if n == 1 or n %% 5 == 0 then
+				warn(string.format("[Loader] 换服后拉取失败第 %%d 次，3 秒后继续…（%%s）",
+					n, table.concat(detail, " ; ")))
+			end
+			task.wait(3)
+		end
 	end
+
+	-- 网络拿到的顺手也缓存一份
+	if writefile and src ~= nil then pcall(writefile, CACHE, src) end
 	local fn = loadstring(src)
 	if fn then pcall(fn) end
-]]):format(LOADER_URL)
+]]):format(LOADER_URL, CACHE_FILE)
 
 -- ══════════════════════════════════════════════════════════
 --  排队 + 立即执行
