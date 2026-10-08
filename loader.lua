@@ -68,16 +68,27 @@ local function httpGet(url)
 	local errs = {}
 
 	-- ① request —— ★ 必须带 User-Agent，不然 GitHub 回 403 ★
+	-- 但实测：加了 UA 还是 403。多半是执行器根本没把我们给的 Headers 发出去。
+	-- 所以这里把【几种常见的 Headers 写法全带上】——
+	-- 各执行器认哪个不一样，多写不冲突，认的那一种就能生效。
 	local req = (syn and syn.request) or request
 	if req then
 		local ok, res = pcall(function()
 			return req({
 				Url = u,
 				Method = "GET",
+				-- 写法 A：Headers
 				Headers = {
 					["User-Agent"] = UA,
 					["Accept"] = "*/*",
 				},
+				-- 写法 B：HttpHeaders（有些执行器只认这个）
+				HttpHeaders = {
+					["User-Agent"] = UA,
+					["Accept"] = "*/*",
+				},
+				-- 写法 C：顶层字段（还有的执行器把 UA 当独立参数）
+				UserAgent = UA,
 			})
 		end)
 		if ok and type(res) == "table" then
@@ -112,27 +123,33 @@ local function httpGet(url)
 end
 
 -- 带重试的拉取 = 【无限重试直到成功】
--- 每轮会依次试 raw 和 jsDelivr 两个源。
+-- 每轮会依次试 raw 和 fastly 两个源，并把【每个源各自的结果】打出来，
+-- 这样日志能直接看出是哪个源、什么状态，而不用猜。
 local function httpGetForever(url, label)
 	local urls = candidates(url)
 	local n = 0
+	-- ★ 一开始就把候选链接打出来 ★ 日志里能看到实际用的是哪两个
+	print(string.format("[Loader] %s 的候选源：", label))
+	for i, u in ipairs(urls) do print(string.format("[Loader]   %d) %s", i, u)) end
 	while true do
 		n = n + 1
-		local lastErr
-		for _, u in ipairs(urls) do
+		local detail = {}
+		for i, u in ipairs(urls) do
 			local body, err = httpGet(u)
 			if body then
 				if n > 1 then
 					print(string.format("[Loader] %s 第 %d 次尝试成功", label, n))
 				end
-				if u ~= url then print("[Loader] （用的是备用源 jsDelivr）") end
+				if i > 1 then
+					print(string.format("[Loader] （用的是第 %d 个源：%s）", i, u))
+				end
 				return body
 			end
-			lastErr = err
+			detail[#detail + 1] = string.format("源%d[%s]", i, tostring(err))
 		end
 		if n == 1 or n % 5 == 0 then
 			print(string.format("[Loader] %s 第 %d 次失败，3 秒后继续重试…（%s）",
-				label, n, tostring(lastErr)))
+				label, n, table.concat(detail, " ; ")))
 		end
 		task.wait(3)
 	end
