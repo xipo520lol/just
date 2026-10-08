@@ -8,10 +8,17 @@
 	   2. 确认下面的 SCRIPT_URL 是 dungeon.lua 的 raw 链接
 	   3. 在 Xeno 里执行【这个文件】一次
 
-	 v4 依据实测日志修的：
-	   日志显示 —— game:HttpGet ok=true -> nil（调用成功但返回 nil，静默失败）
-	              request    ok=true -> table:0x...（★ 其实成功了 ★）
-	   所以：request 放第一位，并且放宽对返回格式的接受（Body / body / 直接字符串）。
+	 v6 —— 实测日志定位到根因：
+	   request 状态=403 Body=nil
+	   403 = Forbidden。raw.githubusercontent.com 会【拒绝没有 User-Agent
+	   的请求】。我的 PowerShell 带了 UA 所以次次 200，执行器的 request
+	   不带 UA 所以次次 403 —— 现象完全对得上。
+
+	  修法两条一起上：
+	   ① request 里带上 User-Agent（关键修复）
+	   ② 加 jsDelivr 备用源：cdn.jsdelivr.net/gh/用户/仓库@main/文件
+	      jsDelivr 不挑 UA，而且有 CDN 缓存，通常更快更稳
+	  两个源轮着试，任何一个成功就继续。
 --]]
 
 -- ══════════════════════════════════════════════════════════
@@ -26,10 +33,33 @@ local AUTO_RECUR = true
 local LOADER_URL = SCRIPT_URL:gsub("dungeon%.lua", "loader.lua")
 
 -- ══════════════════════════════════════════════════════════
---  ★ HTTP 拉取（按实测顺序）★
---  ① request   —— 实测这个能用
---  ② game:HttpGet —— 实测返回 nil，放后面兜底
---  ③ httpget   —— 有些执行器只有这个
+--  ★ 从一个 raw 链接推出 jsDelivr 备用链接 ★
+--  raw:      https://raw.githubusercontent.com/用户/仓库/refs/heads/main/文件
+--  jsDelivr: https://cdn.jsdelivr.net/gh/用户/仓库@main/文件
+-- ══════════════════════════════════════════════════════════
+local function toJsdelivr(url)  -- 用 fastly 节点（实测 cdn 节点连不上）
+	local user, repo, branch, file =
+		url:match("raw%.githubusercontent%.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$")
+	if not user then
+		user, repo, branch, file =
+			url:match("raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+	end
+	if not user then return nil end
+	return string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", user, repo, branch, file)
+end
+
+-- 候选链接列表（先 raw，失败后自动换 jsDelivr）
+local function candidates(url)
+	local out = { url }
+	local j = toJsdelivr(url)
+	if j then out[#out + 1] = j end
+	return out
+end
+
+local UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+-- ══════════════════════════════════════════════════════════
+--  ★ HTTP 拉取 ★
 --  返回 body, 错误信息（错误里带状态码，方便定位）
 -- ══════════════════════════════════════════════════════════
 local function httpGet(url)
@@ -37,36 +67,42 @@ local function httpGet(url)
 	local u = url .. sep .. "t=" .. tostring(os.time())
 	local errs = {}
 
-	-- ① request（syn.request 或全局 request）
+	-- ① request —— ★ 必须带 User-Agent，不然 GitHub 回 403 ★
 	local req = (syn and syn.request) or request
 	if req then
 		local ok, res = pcall(function()
-			return req({ Url = u, Method = "GET" })
+			return req({
+				Url = u,
+				Method = "GET",
+				Headers = {
+					["User-Agent"] = UA,
+					["Accept"] = "*/*",
+				},
+			})
 		end)
 		if ok and type(res) == "table" then
-			-- 不同执行器字段名不一样，都试一下
 			local body = res.Body or res.body or res.Data or res.data
 			if type(body) == "string" and #body > 0 then return body end
-			errs[#errs + 1] = string.format("request 状态=%s Body=%s 长度=%s",
+			errs[#errs + 1] = string.format("request 状态=%s 长度=%s",
 				tostring(res.StatusCode or res.Status or "?"),
-				type(body), body and #body or "nil")
+				body and #body or "nil")
 		else
 			errs[#errs + 1] = "request ok=" .. tostring(ok) .. " -> " .. tostring(res)
 		end
 	end
 
-	-- ② game:HttpGet
+	-- ② game:HttpGet（部分执行器会自己带 UA）
 	if game and game.HttpGet then
 		local ok, res = pcall(function() return game:HttpGet(u) end)
 		if ok and type(res) == "string" and #res > 0 then return res end
-		errs[#errs + 1] = "game:HttpGet ok=" .. tostring(ok) .. " -> " .. tostring(res)
+		errs[#errs + 1] = "game:HttpGet -> " .. tostring(res)
 	end
 
 	-- ③ 全局 httpget
 	if httpget then
 		local ok, res = pcall(function() return httpget(u) end)
 		if ok and type(res) == "string" and #res > 0 then return res end
-		errs[#errs + 1] = "httpget ok=" .. tostring(ok) .. " -> " .. tostring(res)
+		errs[#errs + 1] = "httpget -> " .. tostring(res)
 	end
 
 	if #errs == 0 then
@@ -76,24 +112,27 @@ local function httpGet(url)
 end
 
 -- 带重试的拉取 = 【无限重试直到成功】
--- 实测网络不稳定：同一个链接有时 200、有时超时。
--- 所以不设上限 —— 一直试，每隔几秒一次，成功为止。
--- （放在独立线程里调用，不会挡住排队/UI。）
+-- 每轮会依次试 raw 和 jsDelivr 两个源。
 local function httpGetForever(url, label)
+	local urls = candidates(url)
 	local n = 0
 	while true do
 		n = n + 1
-		local body, err = httpGet(url)
-		if body then
-			if n > 1 then
-				print(string.format("[Loader] %s 第 %d 次尝试成功", label, n))
+		local lastErr
+		for _, u in ipairs(urls) do
+			local body, err = httpGet(u)
+			if body then
+				if n > 1 then
+					print(string.format("[Loader] %s 第 %d 次尝试成功", label, n))
+				end
+				if u ~= url then print("[Loader] （用的是备用源 jsDelivr）") end
+				return body
 			end
-			return body
+			lastErr = err
 		end
-		-- 第 1 次和之后每 5 次报一次，别刷屏
 		if n == 1 or n % 5 == 0 then
 			print(string.format("[Loader] %s 第 %d 次失败，3 秒后继续重试…（%s）",
-				label, n, tostring(err)))
+				label, n, tostring(lastErr)))
 		end
 		task.wait(3)
 	end
@@ -118,15 +157,31 @@ end
 
 -- ══════════════════════════════════════════════════════════
 --  ★ 换服后排队的代码 ★
---  内嵌一份精简版的多方法拉取（不能只靠 game:HttpGet —— 实测它返回 nil）
+--  内嵌同样的逻辑：带 UA 的 request + jsDelivr 备用源 + 无限重试
+--  （注意：模板里除了 %q，其它 % 都必须写成 %% —— 否则外层 :format
+--    会把它当占位符，报 "missing argument"。这里踩过坑。）
 -- ══════════════════════════════════════════════════════════
 local QUEUED = ([[
-	local LOADER = %q
+	local RAW = %q
+	local function toJs(u)
+		-- 注意：这里是【模板内部】。Lua 模式里的百分号必须写成两个，
+		-- 否则外层 format 会把它当占位符，报 missing argument。
+		local a, b, c, d = u:match("raw%%.githubusercontent%%.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$")
+		if not a then a, b, c, d = u:match("raw%%.githubusercontent%%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$") end
+		if not a then return nil end
+		return string.format("https://fastly.jsdelivr.net/gh/%%s/%%s@%%s/%%s", a, b, c, d)
+	end
+	local RAW2 = toJs(RAW)
+	local UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
 	local function g(u)
 		u = u .. (string.find(u, "?", 1, true) and "&" or "?") .. "t=" .. tostring(os.time())
 		local req = (syn and syn.request) or request
 		if req then
-			local ok, res = pcall(function() return req({ Url = u, Method = "GET" }) end)
+			-- ★ 带 User-Agent，否则 GitHub 回 403 ★
+			local ok, res = pcall(function()
+				return req({ Url = u, Method = "GET", Headers = { ["User-Agent"] = UA, ["Accept"] = "*/*" } })
+			end)
 			if ok and type(res) == "table" then
 				local b = res.Body or res.body or res.Data
 				if type(b) == "string" and #b > 0 then return b end
@@ -138,6 +193,7 @@ local QUEUED = ([[
 		end
 		return nil
 	end
+
 	-- 等角色出来
 	local PLR = game:GetService("Players").LocalPlayer
 	local waited = 0
@@ -148,12 +204,14 @@ local QUEUED = ([[
 		waited = waited + 0.5
 	end
 	task.wait(1)
-	-- ★ 无限重试直到拉到 ★（换服后也一样，网络不稳时别放弃）
+
+	-- ★ 无限重试直到拉到，两个源轮着试 ★
 	local src
 	local n = 0
 	while not src do
 		n = n + 1
-		local s = g(LOADER)
+		local s = g(RAW)
+		if not (s and #s > 80) and RAW2 then s = g(RAW2) end
 		if s and #s > 80 then src = s break end
 		if n == 1 or n %% 5 == 0 then
 			warn(string.format("[Loader] 换服后拉取加载器第 %%d 次失败，3 秒后继续…", n))
@@ -185,7 +243,6 @@ print("[Loader] 正在拉取 dungeon.lua（首次，失败会自动无限重试�
 task.spawn(function()
 	local okRun, errRun = runUrl(SCRIPT_URL, "dungeon.lua")
 	if not okRun then
-		-- 这里只会在"拉到了但内容有问题（太短/语法错/执行错）"时才到
 		warn("[Loader] " .. tostring(errRun))
 		warn("[Loader] 内容问题不是网络问题 —— 检查 GitHub 上那个文件本身。")
 	end
